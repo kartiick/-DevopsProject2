@@ -306,74 +306,85 @@ pipeline {
 pipeline {
     agent any
 
-    environment {
-        KUBECTL = '/usr/local/bin/kubectl'
-    }
-
     parameters {
-        string(name: 'CLUSTER_NAME', defaultValue: 'amazon-prime-cluster', description: 'Enter your EKS cluster name')
+        string(name: 'CLUSTER_NAME', defaultValue: 'amazon-prime-cluster', description: 'EKS cluster name')
     }
 
     stages {
-
-        stage("Login to EKS") {
+        stage('Setup AWS and Kubeconfig') {
             steps {
-                script {
-                    withCredentials([string(credentialsId: 'access-key', variable: 'AWS_ACCESS_KEY'),
-                                     string(credentialsId: 'secret-key', variable: 'AWS_SECRET_KEY')]) {
-                        sh "aws eks --region us-east-1 update-kubeconfig --name ${params.CLUSTER_NAME}"
-                    }
+                withCredentials([
+                    string(credentialsId: 'access-key', variable: 'AWS_ACCESS_KEY_ID'),
+                    string(credentialsId: 'secret-key', variable: 'AWS_SECRET_ACCESS_KEY')
+                ]) {
+                    sh '''
+                        export AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID
+                        export AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY
+                        export AWS_DEFAULT_REGION=us-east-1
+                        echo "[*] Updating kubeconfig for cluster $CLUSTER_NAME"
+                        aws eks update-kubeconfig --region $AWS_DEFAULT_REGION --name $CLUSTER_NAME
+                    '''
                 }
             }
         }
-        
-        stage('Cleanup K8s Resources') {
+
+        stage('Cleanup Kubernetes Resources') {
             steps {
-                script {
-                    // Step 1: Delete services and deployments
-                    sh 'kubectl delete svc kubernetes || true'
-                    sh 'kubectl delete deploy pandacloud-app || true'
-                    sh 'kubectl delete svc pandacloud-app || true'
+                withCredentials([
+                    string(credentialsId: 'access-key', variable: 'AWS_ACCESS_KEY_ID'),
+                    string(credentialsId: 'secret-key', variable: 'AWS_SECRET_ACCESS_KEY')
+                ]) {
+                    sh '''
+                        export AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID
+                        export AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY
+                        export AWS_DEFAULT_REGION=us-east-1
 
-                    // Step 2: Delete ArgoCD installation and namespace
-                    sh 'kubectl delete -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml || true'
-                    sh 'kubectl delete namespace argocd || true'
+                        echo "[*] Deleting deployment and services"
+                        kubectl delete deploy pandacloud-app --ignore-not-found
+                        kubectl delete svc pandacloud-app --ignore-not-found
 
-                    // Step 3: List and uninstall Helm releases in prometheus namespace
-                    sh 'helm list -n prometheus || true'
-                    sh 'helm uninstall kube-stack -n prometheus || true'
-                    
-                    // Step 4: Delete prometheus namespace
-                    sh 'kubectl delete namespace prometheus || true'
+                        echo "[*] Deleting ArgoCD resources"
+                        kubectl delete -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml --ignore-not-found
+                        kubectl delete namespace argocd --ignore-not-found
 
-                    // Step 5: Remove Helm repositories
-                    sh 'helm repo remove stable || true'
-                    sh 'helm repo remove prometheus-community || true'
+                        echo "[*] Deleting prometheus Helm release and namespace"
+                        helm uninstall kube-stack -n prometheus || true
+                        kubectl delete namespace prometheus --ignore-not-found
+
+                        echo "[*] Removing Helm repos"
+                        helm repo remove stable || true
+                        helm repo remove prometheus-community || true
+                    '''
                 }
             }
         }
-		
+
         stage('Delete ECR Repository and KMS Keys') {
             steps {
-                script {
-                    // Step 1: Delete ECR Repository
+                withCredentials([
+                    string(credentialsId: 'access-key', variable: 'AWS_ACCESS_KEY_ID'),
+                    string(credentialsId: 'secret-key', variable: 'AWS_SECRET_ACCESS_KEY')
+                ]) {
                     sh '''
-                    aws ecr delete-repository --repository-name amazon-prime --region us-east-1 --force
-                    '''
+                        export AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID
+                        export AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY
+                        export AWS_DEFAULT_REGION=us-east-1
 
-                    // Step 2: Delete KMS Keys
-                    sh '''
-                    for key in $(aws kms list-keys --region us-east-1 --query "Keys[*].KeyId" --output text); do
-                        aws kms disable-key --key-id $key --region us-east-1
-                        aws kms schedule-key-deletion --key-id $key --pending-window-in-days 7 --region us-east-1
-                    done
+                        echo "[*] Deleting ECR repository"
+                        aws ecr delete-repository --repository-name amazon-prime --region $AWS_DEFAULT_REGION --force || true
+
+                        echo "[*] Scheduling deletion of KMS keys"
+                        for key in $(aws kms list-keys --region $AWS_DEFAULT_REGION --query "Keys[*].KeyId" --output text); do
+                            aws kms disable-key --key-id $key --region $AWS_DEFAULT_REGION || true
+                            aws kms schedule-key-deletion --key-id $key --pending-window-in-days 7 --region $AWS_DEFAULT_REGION || true
+                        done
                     '''
                 }
             }
-        }		
-		
+        }
     }
 }
+
 ```
 
 ## Additional Information
