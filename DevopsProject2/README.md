@@ -87,114 +87,141 @@ Create a Jenkins pipeline by adding the following script:
 pipeline {
     agent any
     
-    parameters {
-        string(name: 'ECR_REPO_NAME', defaultValue: 'amazon-prime', description: 'Enter repository name')
-        string(name: 'AWS_ACCOUNT_ID', defaultValue: '123456789012', description: 'Enter AWS Account ID') // Added missing quote
-    }
-    
     tools {
         jdk 'JDK'
         nodejs 'NodeJS'
     }
-    
+
     environment {
         SCANNER_HOME = tool 'SonarQube Scanner'
     }
-    
+
+    parameters {
+        string(
+            name: 'ECR_REPO_NAME',
+            defaultValue: 'amazon-prime',
+            description: 'Enter your ECR repository name'
+        )
+        string(
+            name: 'AWS_ACCOUNT_ID',
+            defaultValue: '',
+            description: 'Enter your AWS Account ID'
+        )
+    }
+
     stages {
-        stage('1. Git Checkout') {
+        stage('Checkout') {
             steps {
                 git branch: 'main', url: 'https://github.com/pandacloud1/DevopsProject2.git'
             }
         }
-        
-        stage('2. SonarQube Analysis') {
+
+        stage('SonarQube Analysis') {
             steps {
-                withSonarQubeEnv ('sonar-server') {
+                withSonarQubeEnv('sonar-server') {
                     sh """
-                    $SCANNER_HOME/bin/sonar-scanner \
-                    -Dsonar.projectName=amazon-prime \
-                    -Dsonar.projectKey=amazon-prime
+                        ${SCANNER_HOME}/bin/sonar-scanner \
+                        -Dsonar.projectName=amazon-prime \
+                        -Dsonar.projectKey=amazon-prime \
+                        -Dsonar.sources=.
                     """
                 }
             }
         }
-        
-        stage('3. Quality Gate') {
+
+        stage('SonarQube Quality Gate') {
             steps {
-                waitForQualityGate abortPipeline: false, 
-                credentialsId: 'sonar-token'
+                timeout(time: 1, unit: 'MINUTES') {
+                    waitForQualityGate abortPipeline: false, credentialsId: 'sonar-token'
+                }
             }
         }
-        
-        stage('4. Install npm') {
+
+        stage('NPM Install') {
             steps {
-                sh "npm install"
+                sh 'npm install'
             }
         }
-        
-        stage('5. Trivy Scan') {
+
+        stage('Trivy Scan') {
             steps {
-                sh "trivy fs . > trivy.txt"
+                sh 'trivy fs . > trivy-scan-results.txt'
             }
         }
-        
-        stage('6. Build Docker Image') {
+
+        stage('Docker Image Build') {
             steps {
                 sh "docker build -t ${params.ECR_REPO_NAME} ."
             }
         }
-        
-        stage('7. Create ECR repo') {
+
+        stage('Create ECR Repo') {
             steps {
-                withCredentials([string(credentialsId: 'access-key', variable: 'AWS_ACCESS_KEY'), 
-                                 string(credentialsId: 'secret-key', variable: 'AWS_SECRET_KEY')]) {
+                withCredentials([
+                    string(credentialsId: 'access-key', variable: 'AWS_ACCESS_KEY'), 
+                    string(credentialsId: 'secret-key', variable: 'AWS_SECRET_KEY')
+                ]) {
                     sh """
-                    aws configure set aws_access_key_id $AWS_ACCESS_KEY
-                    aws configure set aws_secret_access_key $AWS_SECRET_KEY
-                    aws ecr describe-repositories --repository-names ${params.ECR_REPO_NAME} --region us-east-1 || \
-                    aws ecr create-repository --repository-name ${params.ECR_REPO_NAME} --region us-east-1
+                        export AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY}
+                        export AWS_SECRET_ACCESS_KEY=${AWS_SECRET_KEY}
+
+                        aws ecr describe-repositories --repository-names ${params.ECR_REPO_NAME} --region us-east-1 >/dev/null 2>&1 || \\
+                        aws ecr create-repository --repository-name ${params.ECR_REPO_NAME} --region us-east-1
                     """
                 }
             }
         }
-        
-        stage('8. Login to ECR & tag image') {
+
+        stage('ECR Login & Tag Image') {
             steps {
-                withCredentials([string(credentialsId: 'access-key', variable: 'AWS_ACCESS_KEY'), 
-                                 string(credentialsId: 'secret-key', variable: 'AWS_SECRET_KEY')]) {
+                withCredentials([
+                    string(credentialsId: 'access-key', variable: 'AWS_ACCESS_KEY'),
+                    string(credentialsId: 'secret-key', variable: 'AWS_SECRET_KEY')
+                ]) {
                     sh """
-                    aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin ${params.AWS_ACCOUNT_ID}.dkr.ecr.us-east-1.amazonaws.com
-                    docker tag ${params.ECR_REPO_NAME} ${params.AWS_ACCOUNT_ID}.dkr.ecr.us-east-1.amazonaws.com/${params.ECR_REPO_NAME}:${BUILD_NUMBER}
-                    docker tag ${params.ECR_REPO_NAME} ${params.AWS_ACCOUNT_ID}.dkr.ecr.us-east-1.amazonaws.com/${params.ECR_REPO_NAME}:latest
+                        export AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY}
+                        export AWS_SECRET_ACCESS_KEY=${AWS_SECRET_KEY}
+
+                        aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin ${params.AWS_ACCOUNT_ID}.dkr.ecr.us-east-1.amazonaws.com
+
+                        docker tag ${params.ECR_REPO_NAME} ${params.AWS_ACCOUNT_ID}.dkr.ecr.us-east-1.amazonaws.com/${params.ECR_REPO_NAME}:$BUILD_NUMBER
+                        
+                        docker tag ${params.ECR_REPO_NAME} ${params.AWS_ACCOUNT_ID}.dkr.ecr.us-east-1.amazonaws.com/${params.ECR_REPO_NAME}:latest
                     """
                 }
             }
         }
-        
-        stage('9. Push image to ECR') {
+
+        stage('Push Image to ECR') {
             steps {
-                withCredentials([string(credentialsId: 'access-key', variable: 'AWS_ACCESS_KEY'), 
-                                 string(credentialsId: 'secret-key', variable: 'AWS_SECRET_KEY')]) {
+                withCredentials([
+                    string(credentialsId: 'access-key', variable: 'AWS_ACCESS_KEY'),
+                    string(credentialsId: 'secret-key', variable: 'AWS_SECRET_KEY')
+                ]) {
                     sh """
-                    docker push ${params.AWS_ACCOUNT_ID}.dkr.ecr.us-east-1.amazonaws.com/${params.ECR_REPO_NAME}:${BUILD_NUMBER}
-                    docker push ${params.AWS_ACCOUNT_ID}.dkr.ecr.us-east-1.amazonaws.com/${params.ECR_REPO_NAME}:latest
+                        export AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY}
+                        export AWS_SECRET_ACCESS_KEY=${AWS_SECRET_KEY}
+
+                        docker push ${params.AWS_ACCOUNT_ID}.dkr.ecr.us-east-1.amazonaws.com/${params.ECR_REPO_NAME}:$BUILD_NUMBER
+                        
+                        docker push ${params.AWS_ACCOUNT_ID}.dkr.ecr.us-east-1.amazonaws.com/${params.ECR_REPO_NAME}:latest
                     """
                 }
             }
         }
-        
-        stage('10. Cleanup Images') {
+
+        stage('Cleanup Docker Images') {
             steps {
                 sh """
-                docker rmi ${params.AWS_ACCOUNT_ID}.dkr.ecr.us-east-1.amazonaws.com/${params.ECR_REPO_NAME}:${BUILD_NUMBER}
-                docker rmi ${params.AWS_ACCOUNT_ID}.dkr.ecr.us-east-1.amazonaws.com/${params.ECR_REPO_NAME}:latest
-		docker images
+                    docker rmi -f ${params.AWS_ACCOUNT_ID}.dkr.ecr.us-east-1.amazonaws.com/${params.ECR_REPO_NAME}:$BUILD_NUMBER || true
+                    docker rmi -f ${params.AWS_ACCOUNT_ID}.dkr.ecr.us-east-1.amazonaws.com/${params.ECR_REPO_NAME}:latest || true
+                    docker rmi -f ${params.ECR_REPO_NAME} || true
                 """
             }
         }
     }
 }
+
 ```
 
 ## Continuous Deployment with ArgoCD
@@ -209,6 +236,9 @@ pipeline {
 
     environment {
         KUBECTL = '/usr/local/bin/kubectl'
+        AWS_ACCESS_KEY_ID = credentials('access-key')   // Jenkins credentials ID for AWS Access Key
+        AWS_SECRET_ACCESS_KEY = credentials('secret-key')  // Jenkins credentials ID for AWS Secret Key
+        AWS_DEFAULT_REGION = 'us-east-1'
     }
 
     parameters {
@@ -219,10 +249,7 @@ pipeline {
         stage("Login to EKS") {
             steps {
                 script {
-                    withCredentials([string(credentialsId: 'access-key', variable: 'AWS_ACCESS_KEY'),
-                                     string(credentialsId: 'secret-key', variable: 'AWS_SECRET_KEY')]) {
-                        sh "aws eks --region us-east-1 update-kubeconfig --name ${params.CLUSTER_NAME}"
-                    }
+                    sh "aws eks --region ${env.AWS_DEFAULT_REGION} update-kubeconfig --name ${params.CLUSTER_NAME}"
                 }
             }
         }
@@ -233,17 +260,23 @@ pipeline {
                     sh """
                     helm repo add stable https://charts.helm.sh/stable || true
                     helm repo add prometheus-community https://prometheus-community.github.io/helm-charts || true
-                    # Check if namespace 'prometheus' exists
-                    if kubectl get namespace prometheus > /dev/null 2>&1; then
-                        # If namespace exists, upgrade the Helm release
-                        helm upgrade stable prometheus-community/kube-prometheus-stack -n prometheus
+                    helm repo update
+
+                    if ${KUBECTL} get namespace prometheus > /dev/null 2>&1; then
+                        helm upgrade kube-prometheus prometheus-community/kube-prometheus-stack -n prometheus --wait
                     else
-                        # If namespace does not exist, create it and install Helm release
-                        kubectl create namespace prometheus
-                        helm install stable prometheus-community/kube-prometheus-stack -n prometheus
+                        ${KUBECTL} create namespace prometheus
+                        helm install kube-prometheus prometheus-community/kube-prometheus-stack -n prometheus --wait
                     fi
-                    kubectl patch svc stable-kube-prometheus-sta-prometheus -n prometheus -p '{"spec": {"type": "LoadBalancer"}}'
-                    kubectl patch svc stable-grafana -n prometheus -p '{"spec": {"type": "LoadBalancer"}}'
+
+                    echo "Listing services in prometheus namespace:"
+                    ${KUBECTL} get svc -n prometheus
+
+                    echo "Patching Prometheus service to LoadBalancer"
+                    ${KUBECTL} patch svc kube-prometheus-stack-prometheus -n prometheus -p '{"spec": {"type": "LoadBalancer"}}' || echo "Prometheus service patch failed"
+
+                    echo "Patching Grafana service to LoadBalancer"
+                    ${KUBECTL} patch svc kube-prometheus-stack-grafana -n prometheus -p '{"spec": {"type": "LoadBalancer"}}' || echo "Grafana service patch failed"
                     """
                 }
             }
@@ -253,7 +286,6 @@ pipeline {
             steps {
                 script {
                     sh """
-                    # Install ArgoCD
                     kubectl create namespace argocd || true
                     kubectl apply -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
                     kubectl patch svc argocd-server -n argocd -p '{"spec": {"type": "LoadBalancer"}}'
@@ -261,7 +293,6 @@ pipeline {
                 }
             }
         }
-		
     }
 }
 ```
